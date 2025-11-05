@@ -28,4 +28,4 @@ db/db.sql
 configs/
 
 # Generated files
-internal/gen/
+# internal/gen/
