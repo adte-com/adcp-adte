@@ -1,0 +1,105 @@
+version: "3.9"
+
+x-logging: &loki-logging
+  driver: loki
+  options:
+    max-size: "12m"
+    max-file: "5"
+    loki-url: "http://127.0.0.1:3100/loki/api/v1/push"
+    loki-retries: "5"
+    loki-batch-size: "400"
+    loki-pipeline-stages: |
+      - json:
+          expressions:
+            level: level
+            path: path
+            method: method
+            msg: msg
+      - labels:
+          msg: 
+          level:
+          path:
+          method:
+
+x-common: &default-keys
+  networks:
+    - public
+    - monitor
+  restart: always
+  security_opt:
+    - no-new-privileges:true
+  logging: *loki-logging
+
+x-deploy: &deploy-app
+  mode: replicated
+  replicas: 1
+  restart_policy:
+    condition: on-failure
+  placement:
+    constraints:
+      - node.labels.res == cpu
+  resources:
+    limits:
+      memory: 1024M
+    reservations:
+      memory: 128M
+
+services:
+  sales-agent-mcp:
+    <<: *default-keys
+    hostname: sales-agent-mcp
+    image: zsdima/sales-agent-mcp:latest
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - sales-agent-mcp-data:/var/lib/keys
+    environment:
+      - SERVICE_ADDRESS=[::]:50051
+      - domain=$DOMAIN
+    deploy:
+      <<: *deploy-app
+      labels:
+        - org.label-schema.group=sales-agent-mcp-staging
+        ####################################################################
+        # Auth service
+        ####################################################################
+        - traefik.enable=true
+        - traefik.http.routers.sales-agent-mcp.entrypoints=https
+        - traefik.http.routers.sales-agent-mcp.rule=Host(`sales-agent.${DOMAIN}`)
+        - traefik.http.routers.sales-agent-mcp.tls=true
+        - traefik.http.routers.sales-agent-mcp.tls.certresolver=le
+
+        # Port traefik needs to route traffic to
+        - traefik.http.routers.sales-agent-mcp.service=sales-agent-mcp
+        - traefik.http.services.sales-agent-mcp.loadbalancer.server.port=50051
+        - traefik.http.services.sales-agent-mcp.loadbalancer.server.scheme=h2c
+
+        # Enable middleware
+        - traefik.http.routers.sales-agent-mcp.middlewares=sales-agent-mcp-grpc@swarm,sales-agent-mcp-grpcweb@swarm,sales-agent-mcp-ratelimit@swarm
+
+        # Middleware gRPC Web
+        - traefik.http.middlewares.sales-agent-mcp-grpcweb.grpcweb.allowOrigins=*
+
+        # Middleware gRPC CORS
+        - traefik.http.middlewares.sales-agent-mcp-grpc.headers.accessControlExposeHeaders=Grpc-Status,Grpc-Message,Grpc-Encoding,Grpc-Accept-Encoding
+        - traefik.http.middlewares.sales-agent-mcp-grpc.headers.accessControlAllowMethods=*
+        - traefik.http.middlewares.sales-agent-mcp-grpc.headers.accessControlAllowOriginList=*
+        - traefik.http.middlewares.sales-agent-mcp-grpc.headers.accessControlAllowHeaders=*
+        - traefik.http.middlewares.sales-agent-mcp-grpc.headers.accessControlAllowCredentials=true
+        - traefik.http.middlewares.sales-agent-mcp-grpc.headers.accessControlMaxAge=1000
+        - traefik.http.middlewares.sales-agent-mcp-grpc.headers.customRequestHeaders.te=trailers
+
+        # Middleware rate limit
+        - traefik.http.middlewares.sales-agent-mcp-ratelimit.ratelimit.average=100
+        - traefik.http.middlewares.sales-agent-mcp-ratelimit.ratelimit.burst=50
+        ####################################################################
+
+networks:
+  public:
+    external: true
+    attachable: true
+    driver: overlay
+  monitor:
+    external: false
+
+volumes:
+  sales-agent-mcp-data:

@@ -1,0 +1,151 @@
+{
+    "name": "Adte Sales Agent",
+    "version": "0.1.0",
+    "description": "AdCP Media Buy / Sales Agent MCP server for Adte inventory",
+    "tools": [
+        {
+            "name": "adcp.list_authorized_properties",
+            "description": "List properties authorized for this sales agent",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "adcp.get_products",
+            "description": "Get available advertising products",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "adcp.list_creative_formats",
+            "description": "List supported creative formats",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "adcp.create_media_buy",
+            "description": "Create a new media buy",
+            "inputSchema": {
+                "type": "object",
+                "required": [
+                    "brand_manifest",
+                    "packages"
+                ],
+                "properties": {
+                    "buyer_ref": {
+                        "type": "string",
+                        "description": "Buyer's reference ID"
+                    },
+                    "brand_manifest": {
+                        "type": "object",
+                        "required": [
+                            "url"
+                        ],
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "format": "uri"
+                            },
+                            "name": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "packages": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "required": [
+                                "product_id",
+                                "pricing_option_id",
+                                "format_ids",
+                                "budget"
+                            ],
+                            "properties": {
+                                "buyer_ref": {
+                                    "type": "string"
+                                },
+                                "product_id": {
+                                    "type": "string"
+                                },
+                                "pricing_option_id": {
+                                    "type": "string"
+                                },
+                                "format_ids": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "agent_url": {
+                                                "type": "string"
+                                            },
+                                            "id": {
+                                                "type": "string"
+                                            }
+                                        }
+                                    }
+                                },
+                                "budget": {
+                                    "type": "number",
+                                    "minimum": 0
+                                },
+                                "pacing": {
+                                    "type": "string",
+                                    "enum": [
+                                        "even",
+                                        "asap",
+                                        "frontloaded"
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    "start_time": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "format": "date-time"
+                    }
+                }
+            }
+        },
+        {
+            "name": "adcp.update_media_buy",
+            "description": "Update an existing media buy",
+            "inputSchema": {
+                "type": "object",
+                "required": [
+                    "media_buy_id"
+                ],
+                "properties": {
+                    "media_buy_id": {
+                        "type": "string",
+                        "description": "ID of the media buy to update"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "active",
+                            "paused",
+                            "cancelled"
+                        ],
+                        "description": "New status for the media buy"
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "New end time for the media buy"
+                    }
+                }
+            }
+        }
+    ]
+}

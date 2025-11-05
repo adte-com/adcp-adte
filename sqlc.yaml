@@ -1,0 +1,13 @@
+version: "2"
+sql:
+  - engine: sqlite # postgresql
+    schema: internal/db/schema.sql
+    queries: internal/db/queries.sql
+    gen:
+      go:
+        package: db
+        sql_package: database/sql # pgx/v5
+        out: internal/gen/db
+        emit_prepared_queries: false # true
+    rules:
+      - sqlc/db-prepare
