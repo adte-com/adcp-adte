@@ -17,11 +17,12 @@ import (
 
 // Server struct holds application dependencies (DB, queries, and cached data).
 type Server struct {
-	DB             *sql.DB
-	Queries        *db.Queries
-	Products       []api.Product
-	AuthProperties api.AuthorizedPropertiesResponse
-	Logger         *slog.Logger
+	DB                 *sql.DB
+	Queries            *db.Queries
+	Products           []api.Product
+	AuthProperties     api.AuthorizedPropertiesResponse
+	InternalProperties []api.AuthorizedPropertyGroup // For internal product validation
+	Logger             *slog.Logger
 }
 
 // CreateMediaBuyParams encapsulates parameters for creating a media buy

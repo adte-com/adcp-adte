@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"strings"
 
 	"log/slog"
 	"net/http"
@@ -31,7 +32,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{AddSource: true}))
+	// logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{AddSource: true}))
+	// slog.SetDefault(logger)
+
+	logLevel := slog.LevelInfo
+	switch strings.ToLower(config.Log.Level) {
+	case "trace":
+		logLevel = slog.LevelDebug - 4
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "warn":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	}
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		AddSource: true,
+		Level:     logLevel,
+	}))
 	slog.SetDefault(logger)
 
 	// dsn := os.Getenv("DATABASE_DSN")
@@ -69,13 +88,19 @@ func main() {
 		Queries: db.New(dbConn),
 		Logger:  logger,
 		AuthProperties: api.AuthorizedPropertiesResponse{
-			Properties: []api.AuthorizedPropertyGroup{
-				{
-					PublisherDomain: "adte.com",
-					PropertyIDs:     []string{"fomo_tv_ctv", "fomo_tv_mobile", "fomo_tv_web"},
-				},
+			PublisherDomains:     []string{"adte.com"},
+			PrimaryChannels:      []string{"ctv", "web"},
+			PrimaryCountries:     []string{"US"},
+			PortfolioDescription: "Premium CTV and web video inventory specialist representing ADTE properties including FOMO TV across connected TV, mobile, and web platforms.",
+			LastUpdated:          time.Now().UTC().Format(time.RFC3339),
+		},
+		InternalProperties: []api.AuthorizedPropertyGroup{
+			{
+				PublisherDomain: "adte.com",
+				PropertyIDs:     []string{"fomo_tv_ctv", "fomo_tv_mobile", "fomo_tv_web"},
 			},
 		},
+
 		Products: initializeProducts(),
 	}
 
@@ -178,26 +203,63 @@ func startHTTPServer(srv *server.Server, logger *slog.Logger, httpAddress string
 	httpHandler := httpHandlers.NewHTTPHandler(srv)
 
 	// Setup routes
-	mux := http.NewServeMux()
-	mux.HandleFunc("/list_authorized_properties", httpHandler.ListAuthorizedPropertiesHandler)
-	mux.HandleFunc("/get_products", httpHandler.GetProductsHandler)
-	mux.HandleFunc("/list_creative_formats", httpHandler.ListCreativeFormatsHandler)
-	mux.HandleFunc("/create_media_buy", httpHandler.CreateMediaBuyHandler)
-	mux.HandleFunc("/update_media_buy", httpHandler.UpdateMediaBuyHandler)
-	mux.HandleFunc("/health", httpHandler.HealthHandler)
+	// mux := http.NewServeMux()
+	// mux.HandleFunc("/", httpHandler.RootHandler)    // Add root discovery
+	// mux.HandleFunc("/mcp", httpHandler.MCPHandler)  // Add MCP endpoint
+	// mux.HandleFunc("/mcp/", httpHandler.MCPHandler) // Handle with trailing slash too
+
+	// mux.HandleFunc("/list_authorized_properties", httpHandler.ListAuthorizedPropertiesHandler)
+	// mux.HandleFunc("/get_products", httpHandler.GetProductsHandler)
+	// mux.HandleFunc("/list_creative_formats", httpHandler.ListCreativeFormatsHandler)
+	// mux.HandleFunc("/create_media_buy", httpHandler.CreateMediaBuyHandler)
+	// mux.HandleFunc("/update_media_buy", httpHandler.UpdateMediaBuyHandler)
+	// mux.HandleFunc("/health", httpHandler.HealthHandler)
+
+	// Create a debug wrapper to log all requests
+	debugMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logger.Debug("incoming request", "method", r.Method, "path", r.URL.Path)
+
+		// Setup routes inline for debugging
+		switch r.URL.Path {
+		case "/":
+			httpHandler.RootHandler(w, r)
+		case "/mcp", "/mcp/":
+			logger.Debug("routing to MCPHandler")
+			httpHandler.MCPHandler(w, r)
+		case "/list_authorized_properties":
+			httpHandler.ListAuthorizedPropertiesHandler(w, r)
+		case "/get_products":
+			httpHandler.GetProductsHandler(w, r)
+		case "/list_creative_formats":
+			httpHandler.ListCreativeFormatsHandler(w, r)
+		case "/create_media_buy":
+			httpHandler.CreateMediaBuyHandler(w, r)
+		case "/update_media_buy":
+			httpHandler.UpdateMediaBuyHandler(w, r)
+		case "/health":
+			httpHandler.HealthHandler(w, r)
+		default:
+			logger.Debug("no route matched", "path", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
 
 	// Setup middleware
 	limiterStore := middleware.NewRateLimiterStore(10, 20, 10*time.Minute)
 	handler := middleware.LoggingMiddleware(logger)(
-		middleware.RateLimitMiddleware(limiterStore)(
-			middleware.LimitBodySize(1 << 20)(
-				middleware.CORSMiddleware(mux),
+		middleware.CORSMiddleware(
+			middleware.RateLimitMiddleware(limiterStore)(
+				middleware.LimitBodySize(1 << 20)(debugMux),
 			),
 		),
 	)
 
 	// Start the HTTP server
-	logger.Info("Sales Agent service is running", "address", httpAddress)
+	logger.Info("Sales Agent service is running",
+		"address", httpAddress,
+		"mcp_endpoint", "/mcp",
+		"mcp_enabled", os.Getenv("MCP_ENABLED"))
+
 	if err := http.ListenAndServe(httpAddress, handler); err != nil {
 		logger.Error("server shutdown", "error", err)
 	}

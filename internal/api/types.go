@@ -33,13 +33,18 @@ type Product struct {
 	AvailableMetrics []string             `json:"available_metrics"`
 }
 
+// AuthorizedPropertiesResponse represents the response from list_authorized_properties
+type AuthorizedPropertiesResponse struct {
+	PublisherDomains     []string `json:"publisher_domains"`
+	PrimaryChannels      []string `json:"primary_channels,omitempty"`
+	PrimaryCountries     []string `json:"primary_countries,omitempty"`
+	PortfolioDescription string   `json:"portfolio_description,omitempty"`
+	LastUpdated          string   `json:"last_updated,omitempty"`
+}
+
 type AuthorizedPropertyGroup struct {
 	PublisherDomain string   `json:"publisher_domain"`
 	PropertyIDs     []string `json:"property_ids"`
-}
-
-type AuthorizedPropertiesResponse struct {
-	Properties []AuthorizedPropertyGroup `json:"properties"`
 }
 
 type CreativeFormatsResponse struct {
