@@ -53,7 +53,7 @@ func (s *Server) CreateMediaBuy(ctx context.Context, params CreateMediaBuyParams
 	req := params.Request
 
 	// Validate request
-	if err := s.validateMediaBuyRequest(req); err != nil {
+	if err := s.ValidateMediaBuyRequest(req); err != nil {
 		return nil, err
 	}
 
@@ -185,7 +185,8 @@ func (s *Server) UpdateMediaBuy(ctx context.Context, params UpdateMediaBuyParams
 
 // Helper methods
 
-func (s *Server) validateMediaBuyRequest(req *api.CreateMediaBuyRequest) error {
+// ValidateMediaBuyRequest validates a media buy request without creating it (used for dry-run)
+func (s *Server) ValidateMediaBuyRequest(req *api.CreateMediaBuyRequest) error {
 	if req.BrandManifest.URL == "" {
 		return ValidationError{Message: "brand_manifest.url is required", Code: "MISSING_REQUIRED_FIELD"}
 	}

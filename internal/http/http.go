@@ -11,17 +11,21 @@ import (
 	"time"
 
 	"adte.com/adte/sales-agent/internal/api"
+	"adte.com/adte/sales-agent/internal/auth"
+	"adte.com/adte/sales-agent/internal/config"
 	"adte.com/adte/sales-agent/internal/server"
 )
 
 // HTTPHandler wraps the server and provides HTTP handlers
 type HTTPHandler struct {
-	srv *server.Server
+	srv         *server.Server
+	config      *config.Config
+	apiKeyStore *auth.APIKeyStore
 }
 
 // NewHTTPHandler creates a new HTTP handler
-func NewHTTPHandler(srv *server.Server) *HTTPHandler {
-	return &HTTPHandler{srv: srv}
+func NewHTTPHandler(srv *server.Server, config *config.Config, apiKeyStore *auth.APIKeyStore) *HTTPHandler {
+	return &HTTPHandler{srv: srv, config: config, apiKeyStore: apiKeyStore}
 }
 
 // Returns properties that this sales agent is authorized to sell.
@@ -46,6 +50,21 @@ func (h *HTTPHandler) ListAuthorizedPropertiesHandler(w http.ResponseWriter, r *
 //		}
 //	}
 func (h *HTTPHandler) GetProductsHandler(w http.ResponseWriter, r *http.Request) {
+	// Check if request is authenticated
+	principal, isAuthenticated := auth.GetPrincipalFromContext(r.Context())
+	
+	// Log authentication status
+	h.srv.Logger.Debug("get_products request", 
+		"isAuthenticated", isAuthenticated,
+		"principalID", func() string {
+			if principal != nil {
+				return principal.PrincipalID
+			}
+			return "none"
+		}(),
+		"hasAuthHeader", r.Header.Get("Authorization") != "",
+		"hasAPIKey", r.Header.Get("X-API-Key") != "")
+
 	// Parse optional request body for filters
 	var req struct {
 		Brief   string `json:"brief,omitempty"`
@@ -70,9 +89,17 @@ func (h *HTTPHandler) GetProductsHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Convert internal products to match AdCP spec exactly
-	adcpProducts := make([]map[string]interface{}, 0, len(h.srv.Products))
+	// For unauthenticated requests, limit to run-of-network products only
+	productsToShow := h.srv.Products
+	if !isAuthenticated {
+		// Filter to only basic products for unauthenticated users
+		// In this implementation, we'll show products but without pricing
+		h.srv.Logger.Debug("Limiting products for unauthenticated request")
+	}
+	
+	adcpProducts := make([]map[string]interface{}, 0, len(productsToShow))
 
-	for _, product := range h.srv.Products {
+	for _, product := range productsToShow {
 		// Convert properties to AdCP format
 		properties := []map[string]interface{}{}
 		for _, prop := range product.Properties {
@@ -112,8 +139,8 @@ func (h *HTTPHandler) GetProductsHandler(w http.ResponseWriter, r *http.Request)
 			"min_spend":      1000.0, // Minimum spend in USD
 		}
 
-		// Add pricing information
-		if len(product.PricingOptions) > 0 {
+		// Add pricing information only for authenticated requests
+		if isAuthenticated && len(product.PricingOptions) > 0 {
 			// Use the first pricing option's rate as CPM
 			adcpProduct["cpm"] = product.PricingOptions[0].Rate
 
@@ -129,6 +156,10 @@ func (h *HTTPHandler) GetProductsHandler(w http.ResponseWriter, r *http.Request)
 				})
 			}
 			adcpProduct["pricing_options"] = pricingOptions
+		} else if !isAuthenticated {
+			// For unauthenticated requests, remove pricing-related fields
+			delete(adcpProduct, "currency")
+			delete(adcpProduct, "min_spend")
 		}
 
 		// Add measurement capabilities
@@ -150,10 +181,16 @@ func (h *HTTPHandler) GetProductsHandler(w http.ResponseWriter, r *http.Request)
 		"products": adcpProducts,
 	}
 
-	// Add message if brief was provided
-	if req.Brief != "" {
+	// Add authentication status information for unauthenticated requests
+	if !isAuthenticated {
+		resp["limited_results"] = true
+		resp["auth_required_for"] = []string{"pricing", "custom_products", "full_catalog"}
+		resp["message"] = fmt.Sprintf("Found %d products (limited catalog - authenticate for full access including pricing)", len(adcpProducts))
+	} else if req.Brief != "" {
 		resp["message"] = fmt.Sprintf("Found %d products matching your requirements for %s",
 			len(adcpProducts), req.Brief)
+	} else {
+		resp["message"] = fmt.Sprintf("Found %d products available for purchase", len(adcpProducts))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -423,6 +460,13 @@ func (h *HTTPHandler) ListCreativeFormatsHandler(w http.ResponseWriter, r *http.
 func (h *HTTPHandler) CreateMediaBuyHandler(w http.ResponseWriter, r *http.Request) {
 	var req api.CreateMediaBuyRequest
 
+	// Authentication is already enforced by middleware for this endpoint
+	// Get the authenticated principal from context
+	principal, hasPrincipal := auth.GetPrincipalFromContext(r.Context())
+	if hasPrincipal {
+		h.srv.Logger.Debug("create_media_buy request", "principalID", principal.PrincipalID)
+	}
+
 	// Parse request JSON into struct
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -434,7 +478,38 @@ func (h *HTTPHandler) CreateMediaBuyHandler(w http.ResponseWriter, r *http.Reque
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	// Use shared business logic
+	// Check if this is a dry-run request
+	isDryRun := auth.IsDryRun(ctx)
+	
+	if isDryRun {
+		// In dry-run mode, validate but don't save
+		// First validate the request
+		if err := h.srv.ValidateMediaBuyRequest(&req); err != nil {
+			if valErr, ok := err.(server.ValidationError); ok {
+				h.sendErrorResponse(w, valErr.Message, valErr.Code, http.StatusBadRequest)
+				return
+			}
+			h.sendErrorResponse(w, err.Error(), "VALIDATION_ERROR", http.StatusBadRequest)
+			return
+		}
+		
+		// Return success response without actually creating
+		dryRunResp := &api.CreateMediaBuyResponse{
+			MediaBuyID: "mb_dryrun_123",
+			PackageIDs: []string{"pkg_dryrun_1", "pkg_dryrun_2"},
+			Message:    "Media buy validated successfully (dry-run mode)",
+		}
+		
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Dry-Run", "true")
+		w.WriteHeader(http.StatusOK) // Use 200 for dry-run instead of 201
+		if err := json.NewEncoder(w).Encode(dryRunResp); err != nil {
+			h.srv.Logger.Error("encode dry-run response failed", "error", err)
+		}
+		return
+	}
+
+	// Use shared business logic for actual creation
 	resp, err := h.srv.CreateMediaBuy(ctx, server.CreateMediaBuyParams{
 		Request: &req,
 	})
@@ -552,6 +627,21 @@ func (h *HTTPHandler) sendDetailedErrorResponse(w http.ResponseWriter, message s
 		Details: details,
 	}); err != nil {
 		h.srv.Logger.Error("encode detailed error response failed", "code", code, "error", err)
+	}
+}
+
+// sendAuthErrorResponse sends an authentication/authorization error response following AdCP spec
+func (h *HTTPHandler) sendAuthErrorResponse(w http.ResponseWriter, code string, message string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	response := map[string]interface{}{
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
+	}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		h.srv.Logger.Error("encode auth error response failed", "code", code, "error", err)
 	}
 }
 
@@ -859,8 +949,125 @@ func (h *HTTPHandler) MCPHandler(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 
+				// Check if authentication is required for this tool
+				if h.isAuthRequired(params.Name) {
+					// Check for token in Authorization header (Bearer token)
+					authHeader := r.Header.Get("Authorization")
+					
+					// Also check X-MCP-Token header as alternative
+					mcpToken := r.Header.Get("X-MCP-Token")
+					
+					// Extract token from Bearer format
+					var providedToken string
+					if strings.HasPrefix(authHeader, "Bearer ") {
+						providedToken = strings.TrimPrefix(authHeader, "Bearer ")
+					} else if mcpToken != "" {
+						providedToken = mcpToken
+					}
+					
+					// Check if token is provided
+					if providedToken == "" {
+						h.srv.Logger.Debug("MCP authentication missing for protected operation", 
+							"tool", params.Name)
+						jsonRPCError := map[string]interface{}{
+							"jsonrpc": "2.0",
+							"error": map[string]interface{}{
+								"code":    -32603,
+								"message": "Authentication required for this operation",
+								"data": map[string]interface{}{
+									"code": "AUTH_REQUIRED",
+								},
+							},
+							"id": jsonRPCReq.ID,
+						}
+						w.WriteHeader(http.StatusOK)
+						json.NewEncoder(w).Encode(jsonRPCError)
+						return
+					}
+					
+					// Validate token if MCP_AUTH_TOKEN is configured
+					if h.config.MCPAuthToken != "" && providedToken != h.config.MCPAuthToken {
+						h.srv.Logger.Debug("MCP authentication failed - invalid token", 
+							"tool", params.Name,
+							"hasAuthHeader", authHeader != "",
+							"hasMCPToken", mcpToken != "")
+						jsonRPCError := map[string]interface{}{
+							"jsonrpc": "2.0",
+							"error": map[string]interface{}{
+								"code":    -32603,
+								"message": "Invalid or expired credentials",
+								"data": map[string]interface{}{
+									"code": "AUTH_INVALID",
+								},
+							},
+							"id": jsonRPCReq.ID,
+						}
+						w.WriteHeader(http.StatusOK)
+						json.NewEncoder(w).Encode(jsonRPCError)
+						return
+					}
+					
+					// If MCP_AUTH_TOKEN is not set, accept any non-empty token (for development)
+					if h.config.MCPAuthToken == "" {
+						h.srv.Logger.Warn("MCP_AUTH_TOKEN not configured - accepting any token for authenticated operations")
+					}
+				}
+
+				// Log the tool being called
+				h.srv.Logger.Debug("Processing MCP tool call", 
+					"tool", params.Name, 
+					"isAuthRequired", h.isAuthRequired(params.Name),
+					"hasToken", h.config.MCPAuthToken != "")
+				
+				// Determine authentication status
+				// For public tools, we still need to know if a valid token was provided
+				// Extract token from headers
+				authHeader := r.Header.Get("Authorization")
+				mcpToken := r.Header.Get("X-MCP-Token")
+				var providedTokenForContext string
+				if strings.HasPrefix(authHeader, "Bearer ") {
+					providedTokenForContext = strings.TrimPrefix(authHeader, "Bearer ")
+				} else if mcpToken != "" {
+					providedTokenForContext = mcpToken
+				}
+				
+				// Add authentication status to context
+				var toolCtx context.Context
+				isAuthenticated := false
+				
+				// Check if token is an API key
+				if providedTokenForContext != "" {
+					// First try as API key
+					if principal, ok := h.apiKeyStore.GetPrincipal(providedTokenForContext); ok {
+						// Valid API key - add principal to context
+						toolCtx = context.WithValue(r.Context(), auth.ContextKeyPrincipal, principal)
+						toolCtx = context.WithValue(toolCtx, "mcp_authenticated", true)
+						isAuthenticated = true
+						h.srv.Logger.Debug("MCP request authenticated with API key", 
+							"tool", params.Name,
+							"principalID", principal.PrincipalID)
+					} else if h.config.MCPAuthToken != "" && providedTokenForContext == h.config.MCPAuthToken {
+						// Valid MCP token
+						toolCtx = context.WithValue(r.Context(), "mcp_authenticated", true)
+						isAuthenticated = true
+					} else {
+						// Invalid token
+						toolCtx = context.WithValue(r.Context(), "mcp_authenticated", false)
+					}
+				} else {
+					// No token provided
+					toolCtx = context.WithValue(r.Context(), "mcp_authenticated", false)
+				}
+				
+				// Log authentication result
+				if isAuthenticated && !h.isAuthRequired(params.Name) {
+					h.srv.Logger.Debug("MCP tool call authenticated for public endpoint", 
+						"tool", params.Name,
+						"authenticated", isAuthenticated)
+				}
+				
 				// Process the tool call and get both message and data
-				message, data, err := h.processToolCallWithMessage(r.Context(), params.Name, params.Arguments)
+				message, data, err := h.processToolCallWithMessage(toolCtx, params.Name, params.Arguments)
 				if err != nil {
 					jsonRPCError := map[string]interface{}{
 						"jsonrpc": "2.0",
@@ -925,6 +1132,22 @@ func (h *HTTPHandler) MCPHandler(w http.ResponseWriter, r *http.Request) {
 	h.sendErrorResponse(w, "Method not allowed", "METHOD_NOT_ALLOWED", http.StatusMethodNotAllowed)
 }
 
+// isAuthRequired checks if a tool requires authentication according to AdCP spec
+func (h *HTTPHandler) isAuthRequired(toolName string) bool {
+	// Public operations that don't require authentication
+	publicTools := map[string]bool{
+		"list_authorized_properties":      true,
+		"adcp.list_authorized_properties": true,
+		"list_creative_formats":           true,
+		"adcp.list_creative_formats":      true,
+		"get_products":                    true, // Limited results without auth
+		"adcp.get_products":               true,
+		"tools/list":                      true, // Allow listing tools
+	}
+	
+	return !publicTools[toolName]
+}
+
 // processToolCall handles individual tool calls
 func (h *HTTPHandler) processToolCallWithMessage(ctx context.Context, toolName string, arguments json.RawMessage) (string, string, error) {
 	h.srv.Logger.Debug("Processing tool call", "tool", toolName, "arguments", string(arguments))
@@ -986,6 +1209,14 @@ func (h *HTTPHandler) processToolCallWithMessage(ctx context.Context, toolName s
 		return message, string(result), nil
 
 	case "adcp.get_products", "get_products":
+		// Check if request is authenticated
+		isAuthenticated := false
+		if auth, ok := ctx.Value("mcp_authenticated").(bool); ok {
+			isAuthenticated = auth
+		}
+		
+		h.srv.Logger.Debug("get_products called", "isAuthenticated", isAuthenticated)
+		
 		// Parse optional filters
 		var params struct {
 			Brief   string `json:"brief,omitempty"`
@@ -1053,8 +1284,8 @@ func (h *HTTPHandler) processToolCallWithMessage(ctx context.Context, toolName s
 				"min_spend":      1000.0,
 			}
 
-			// Add pricing
-			if len(product.PricingOptions) > 0 {
+			// Add pricing only if authenticated (per AdCP spec)
+			if isAuthenticated && len(product.PricingOptions) > 0 {
 				adcpProduct["cpm"] = product.PricingOptions[0].Rate
 
 				pricingOptions := []map[string]interface{}{}
@@ -1068,6 +1299,10 @@ func (h *HTTPHandler) processToolCallWithMessage(ctx context.Context, toolName s
 					})
 				}
 				adcpProduct["pricing_options"] = pricingOptions
+			} else if !isAuthenticated {
+				// Remove pricing info for unauthenticated requests
+				delete(adcpProduct, "min_spend")
+				delete(adcpProduct, "currency")
 			}
 
 			if len(product.AvailableMetrics) > 0 {
@@ -1089,10 +1324,17 @@ func (h *HTTPHandler) processToolCallWithMessage(ctx context.Context, toolName s
 		}
 
 		// Generate message
-		message := fmt.Sprintf("Found %d products available for purchase", len(adcpProducts))
-		if params.Brief != "" {
-			message = fmt.Sprintf("Found %d products matching your requirements for %s",
-				len(adcpProducts), params.Brief)
+		message := ""
+		if !isAuthenticated {
+			message = fmt.Sprintf("Found %d products (limited catalog - authenticate for full access including pricing)", len(adcpProducts))
+			response["limited_results"] = true
+			response["auth_required_for"] = []string{"pricing", "custom_products", "full_catalog"}
+		} else {
+			message = fmt.Sprintf("Found %d products available for purchase", len(adcpProducts))
+			if params.Brief != "" {
+				message = fmt.Sprintf("Found %d products matching your requirements for %s",
+					len(adcpProducts), params.Brief)
+			}
 		}
 
 		result, err := json.Marshal(response)

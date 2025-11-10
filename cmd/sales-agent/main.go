@@ -13,6 +13,7 @@ import (
 	internalDB "adte.com/adte/sales-agent/internal/db"
 
 	"adte.com/adte/sales-agent/internal/api"
+	"adte.com/adte/sales-agent/internal/auth"
 	"adte.com/adte/sales-agent/internal/config"
 	"adte.com/adte/sales-agent/internal/gen/db"
 	httpHandlers "adte.com/adte/sales-agent/internal/http"
@@ -110,7 +111,7 @@ func main() {
 	}
 
 	// Start HTTP server
-	startHTTPServer(srv, logger, config.HttpAddress)
+	startHTTPServer(srv, logger, config)
 }
 
 func initializeProducts() []api.Product {
@@ -198,9 +199,25 @@ func startMCPServer(srv *server.Server, logger *slog.Logger, transport string) {
 	}()
 }
 
-func startHTTPServer(srv *server.Server, logger *slog.Logger, httpAddress string) {
+func startHTTPServer(srv *server.Server, logger *slog.Logger, config *config.Config) {
+	// Initialize API key store with test keys
+	apiKeyStore := auth.InitializeDefaultAPIKeys()
+
+	// Add configured API keys from environment if available
+	if apiKey := os.Getenv("ADCP_API_KEY"); apiKey != "" {
+		apiKeyStore.AddKey(apiKey, &auth.Principal{
+			PrincipalID: "principal_env",
+			Permissions: map[string][]auth.Permission{
+				"products":   {auth.PermissionRead},
+				"media_buys": {auth.PermissionRead, auth.PermissionWrite},
+				"creatives":  {auth.PermissionRead, auth.PermissionWrite},
+				"reports":    {auth.PermissionRead, auth.PermissionWrite},
+			},
+		})
+	}
+
 	// Create HTTP handlers
-	httpHandler := httpHandlers.NewHTTPHandler(srv)
+	httpHandler := httpHandlers.NewHTTPHandler(srv, config, apiKeyStore)
 
 	// Setup routes
 	// mux := http.NewServeMux()
@@ -246,21 +263,45 @@ func startHTTPServer(srv *server.Server, logger *slog.Logger, httpAddress string
 
 	// Setup middleware
 	limiterStore := middleware.NewRateLimiterStore(10, 20, 10*time.Minute)
+
+	// Define paths that don't require authentication (public operations per AdCP spec)
+	// - list_authorized_properties: Browse available properties (public)
+	// - list_creative_formats: Discover format support (public)
+	// - get_products: Limited results without auth (handled in handler)
+	publicPaths := []string{
+		"/",
+		"/health",
+		"/mcp",
+		"/list_authorized_properties",
+		"/list_creative_formats",
+		"/get_products", // Will return limited results without auth
+	}
+
+	// Create unified authentication middleware (supports JWT and API Key)
+	// Public operations don't require auth, but still extract auth context if present
+	authMiddleware := middleware.OptionalAuthMiddleware(
+		middleware.UnifiedAuthMiddleware(config.JwtSecretKey, apiKeyStore, logger),
+		publicPaths,
+		logger,
+	)
+
 	handler := middleware.LoggingMiddleware(logger)(
 		middleware.CORSMiddleware(
-			middleware.RateLimitMiddleware(limiterStore)(
-				middleware.LimitBodySize(1 << 20)(debugMux),
+			authMiddleware(
+				middleware.RateLimitMiddleware(limiterStore)(
+					middleware.LimitBodySize(1 << 20)(debugMux),
+				),
 			),
 		),
 	)
 
 	// Start the HTTP server
 	logger.Info("Sales Agent service is running",
-		"address", httpAddress,
+		"address", config.HttpAddress,
 		"mcp_endpoint", "/mcp",
 		"mcp_enabled", os.Getenv("MCP_ENABLED"))
 
-	if err := http.ListenAndServe(httpAddress, handler); err != nil {
+	if err := http.ListenAndServe(config.HttpAddress, handler); err != nil {
 		logger.Error("server shutdown", "error", err)
 	}
 }

@@ -16,6 +16,7 @@ type Config struct {
 	HttpApiKey        string
 	OpenTelemetry     bool
 	JwtSecretKey      string
+	MCPAuthToken      string
 	DB                *DbConfig
 	Log               *LogConfig
 	MCP               *MCPConfig
@@ -59,6 +60,8 @@ func NewConfig() (*Config, error) {
 		return nil, fmt.Errorf("missing environment variable: JWT_SECRET_KEY")
 	}
 
+	mcpAuthToken := os.Getenv("MCP_AUTH_TOKEN")
+
 	_, opentelemetry := os.LookupEnv("opentelemetry")
 
 	// Database configuration
@@ -87,6 +90,7 @@ func NewConfig() (*Config, error) {
 		HttpAddress:       httpAddress,
 		HttpApiKey:        httpApiKey,
 		JwtSecretKey:      jwtSecretKey,
+		MCPAuthToken:      mcpAuthToken,
 		OpenTelemetry:     opentelemetry,
 		Log: &LogConfig{
 			Level: logLevel,
